@@ -528,6 +528,35 @@ class App(tk.Tk):
         self._check(opts, "微信被最小化 / 收进托盘时自动还原到后台（否则收不到提醒）",
                     self.auto_restore_var, self._mark_dirty).pack(anchor="w", pady=(4, 0))
 
+        stealth_row = tk.Frame(opts, bg=CARD)
+        stealth_row.pack(anchor="w", fill="x", pady=(8, 0))
+        self.stealth_var = tk.BooleanVar(value=self.cfg.stealth_mode)
+        self._check(stealth_row, "隐身模式：把微信挪到屏幕外（看不到，但照常读）",
+                    self.stealth_var, self._on_stealth_toggle).pack(side="left")
+        ttk.Button(stealth_row, text="调回微信", width=9,
+                   command=self._bring_wechat_back).pack(side="left", padx=(12, 0))
+
+    def _on_stealth_toggle(self) -> None:
+        self._mark_dirty()
+        hwnd = wechat_list.find_wechat_window()
+        if not hwnd:
+            return
+        if self.stealth_var.get():
+            wechat_list.park_offscreen(hwnd)
+        else:
+            wechat_list.bring_on_screen(hwnd)
+
+    def _bring_wechat_back(self) -> None:
+        hwnd = wechat_list.find_wechat_window()
+        if not hwnd:
+            self._set_status("没找到微信窗口", ok=False)
+            return
+        wechat_list.bring_on_screen(hwnd)
+        if self.stealth_var.get():
+            self.stealth_var.set(False)
+            self._mark_dirty()
+        self._set_status("微信已调回屏幕")
+
     def _build_hotkey_page(self, page: tk.Frame) -> None:
         wrap = tk.Frame(page, bg=BG)
         wrap.pack(fill="both", expand=True, padx=18, pady=16)
@@ -791,7 +820,8 @@ class App(tk.Tk):
             lambda m: self.queue.put(("msg", m)),
             lambda s: self.queue.put(("status", s)),
             max(0.6, self.cfg.poll_interval_ms / 1000),
-            lambda: self.auto_restore_var.get())
+            lambda: self.auto_restore_var.get(),
+            lambda: self.stealth_var.get())
         self.watcher.start()
 
     def _pump(self) -> None:
@@ -910,6 +940,7 @@ class App(tk.Tk):
         self.cfg.default_announce = self.default_announce_var.get()
         self.cfg.skip_when_wechat_focused = self.skip_focus_var.get()
         self.cfg.auto_restore_window = self.auto_restore_var.get()
+        self.cfg.stealth_mode = self.stealth_var.get()
         self.cfg.hotkey = self.hotkey_var.get().strip() or self.cfg.hotkey
 
     def _save(self, silent: bool = False) -> None:

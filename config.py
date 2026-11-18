@@ -32,6 +32,7 @@ class Config:
     contact_rules: Dict[str, bool] = field(default_factory=dict)   # name -> announce?
     skip_when_wechat_focused: bool = True
     auto_restore_window: bool = True       # keep WeChat un-minimized so the list stays readable
+    stealth_mode: bool = False             # park the WeChat window outside the screen
     # hotkey
     hotkey: str = "ctrl+alt+q"
     # runtime

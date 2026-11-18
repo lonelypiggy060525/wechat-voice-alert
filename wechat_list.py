@@ -69,6 +69,55 @@ def show_in_background(hwnd: int) -> None:
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW)
 
 
+SWP_NOZORDER = 0x0004
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
+
+
+def virtual_bounds() -> tuple[int, int, int, int]:
+    u = user32
+    return (u.GetSystemMetrics(SM_XVIRTUALSCREEN), u.GetSystemMetrics(SM_YVIRTUALSCREEN),
+            u.GetSystemMetrics(SM_CXVIRTUALSCREEN), u.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+
+
+def window_rect(hwnd: int) -> tuple[int, int, int, int]:
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return int(r.left), int(r.top), int(r.right), int(r.bottom)
+
+
+def is_on_screen(hwnd: int) -> bool:
+    """True when any part of the window overlaps the virtual desktop."""
+    l, t, rgt, b = window_rect(hwnd)
+    vx, vy, vw, vh = virtual_bounds()
+    return not (rgt <= vx or l >= vx + vw or b <= vy or t >= vy + vh)
+
+
+def park_offscreen(hwnd: int) -> bool:
+    """Move the window just outside the virtual desktop: invisible to the user,
+    still composed, so PrintWindow keeps working."""
+    l, t, rgt, b = window_rect(hwnd)
+    vx, _vy, _vw, _vh = virtual_bounds()
+    width = rgt - l
+    if width <= 0:
+        return False
+    if rgt <= vx:          # already parked
+        return True
+    x = vx - width - 80
+    return bool(user32.SetWindowPos(hwnd, 0, x, t, 0, 0,
+                                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER))
+
+
+def bring_on_screen(hwnd: int) -> bool:
+    """Put the window back in the middle of the primary monitor (no focus steal)."""
+    l, t, rgt, b = window_rect(hwnd)
+    w, h = rgt - l, b - t
+    sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    x = max(0, (sw - w) // 2)
+    y = max(0, (sh - h) // 3)
+    return bool(user32.SetWindowPos(hwnd, 0, x, y, 0, 0,
+                                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER))
+
+
 def find_wechat_window() -> int | None:
     for cls in WECHAT_CLASSES:
         for title in WECHAT_TITLES:
@@ -207,12 +256,15 @@ def group_rows(lines: list[dict]) -> list[dict]:
 
 class ChatListWatcher(threading.Thread):
     def __init__(self, on_message: Callable[[dict], None], on_status: Callable[[str], None],
-                 interval: float = 0.8, auto_restore: Callable[[], bool] | None = None) -> None:
+                 interval: float = 0.8, auto_restore: Callable[[], bool] | None = None,
+                 stealth: Callable[[], bool] | None = None) -> None:
         super().__init__(name="chatlist-watcher", daemon=True)
         self.on_message = on_message
         self.on_status = on_status
         self.interval = interval
         self.auto_restore = auto_restore or (lambda: False)
+        self.stealth = stealth or (lambda: False)
+        self._stealth_applied = False
         self._stop = threading.Event()
         self._engine = None
         self._prev: dict[str, str] = {}
@@ -266,12 +318,22 @@ class ChatListWatcher(threading.Thread):
                 hidden = not user32.IsWindowVisible(hwnd)
                 if self.auto_restore():
                     show_in_background(hwnd)
+                    if self.stealth():
+                        park_offscreen(hwnd)
                     time.sleep(0.8)
                     continue
                 self._set_status("微信在托盘里/已最小化，勾选「自动还原」才能提醒" if hidden
                                  else "微信已最小化，勾选「自动还原」才能提醒")
                 time.sleep(1.2)
                 continue
+
+            # stealth: park it once after start-up, never fight the user afterwards
+            if self.stealth():
+                if not self._stealth_applied and is_on_screen(hwnd):
+                    park_offscreen(hwnd)
+                self._stealth_applied = True
+            else:
+                self._stealth_applied = False
             img = capture_window(hwnd)
             if img is None:
                 time.sleep(self.interval)
