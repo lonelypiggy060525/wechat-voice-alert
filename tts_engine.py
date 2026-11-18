@@ -216,12 +216,23 @@ class TTSEngine:
 
     def _say_edge(self, text: str) -> bool:
         voice_id = self.voice.split(":", 1)[1]
-        path = os.path.join(tempfile.gettempdir(), "wechat_voice_alert_tts.mp3")
+        # a unique file per clip: MCI keeps the last one open, and reusing the same
+        # path made every second clip fail to write (PermissionError -> SAPI fallback)
+        path = os.path.join(tempfile.gettempdir(),
+                            f"wechat_voice_alert_tts_{int(time.time() * 1000)}_{os.getpid()}.mp3")
         try:
             ok = asyncio.run(self._stream_edge(text, voice_id, path))
         except Exception:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
             return False
         if not ok or self._stop_flag.is_set():
+            try:
+                os.remove(path)
+            except OSError:
+                pass
             return True   # cancelled or empty - do not fall back
         try:
             self._player.play(path, max(0.05, min(1.0, self.volume / 100)))
@@ -235,6 +246,12 @@ class TTSEngine:
                 time.sleep(0.04)
         except Exception:
             return False
+        finally:
+            self._player.stop()          # close the MCI alias, otherwise the mp3 stays locked
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         return True
 
     async def _stream_edge(self, text: str, voice_id: str, path: str) -> bool:
