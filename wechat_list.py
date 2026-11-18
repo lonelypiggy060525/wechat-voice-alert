@@ -335,6 +335,24 @@ class ChatListWatcher(threading.Thread):
         return {"chat": name, "sender": sender, "content": content, "source": "list"}
 
 
+def debug_ocr_once() -> dict:
+    """Capture the chat list once and return parsed rows (used by --ocr-check)."""
+    hwnd = find_wechat_window()
+    if not hwnd:
+        return {"error": "微信窗口没找到"}
+    img = capture_window(hwnd)
+    if img is None:
+        return {"error": "抓图失败（窗口可能最小化/在托盘里）"}
+    watcher = ChatListWatcher(lambda _m: None, lambda _s: None)
+    lines = watcher._ocr(img)
+    rows = group_rows(lines)
+    return {
+        "size": list(img.size),
+        "badges": badge_rows(img),
+        "rows": rows,
+    }
+
+
 if __name__ == "__main__":
     def on_msg(m):
         print("MSG", m, flush=True)

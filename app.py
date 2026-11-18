@@ -25,7 +25,8 @@ import wechat_list
 from config import Config, append_log
 
 APP_TITLE = "微信语音提醒"
-HERE = os.path.dirname(os.path.abspath(__file__))
+FROZEN = bool(getattr(sys, "frozen", False))
+HERE = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "WeChatVoiceAlert"
 
@@ -69,7 +70,14 @@ def enable_dpi() -> None:
         pass
 
 
+def resource_path(*parts: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
 def autostart_command() -> str:
+    if FROZEN:
+        return f'"{sys.executable}"'
     exe = sys.executable
     pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
     if os.path.exists(pyw):
@@ -178,6 +186,12 @@ class App(tk.Tk):
         self._page = "sound"
 
         self.title(APP_TITLE)
+        try:
+            ico = resource_path("assets", "icon.ico")
+            if os.path.exists(ico):
+                self.iconbitmap(ico)
+        except Exception:
+            pass
         self.geometry("920x740")
         self.minsize(860, 680)
         self.configure(bg=BG)
@@ -993,6 +1007,17 @@ def single_instance() -> bool:
 
 def main() -> None:
     enable_dpi()
+    if "--ocr-check" in sys.argv:
+        import json
+        idx = sys.argv.index("--ocr-check")
+        out = sys.argv[idx + 1] if len(sys.argv) > idx + 1 else os.path.join(HERE, "ocr_check.json")
+        try:
+            data = wechat_list.debug_ocr_once()
+        except Exception as exc:
+            data = {"error": repr(exc)}
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return
     if not single_instance():
         return
     app = App()

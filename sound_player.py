@@ -7,13 +7,19 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import threading
 
 _winmm = ctypes.WinDLL("winmm", use_last_error=True)
 _winmm.mciSendStringW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_void_p]
 _winmm.mciSendStringW.restype = ctypes.c_uint
 
-BUILTIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sounds")
+def resource_path(*parts: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
+BUILTIN_DIR = resource_path("assets", "sounds")
 CACHE_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "WeChatVoiceAlert", "sounds")
 MCI_NATIVE = {".wav", ".mp3", ".wma", ".mid", ".rmi"}
 

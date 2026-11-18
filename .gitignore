@@ -16,3 +16,12 @@ shot*.png
 
 # local config lives in %APPDATA%, never here
 config.local.json
+
+# build output
+dist/
+dist_onedir/
+build/
+build_onedir/
+*.spec
+ocr_check.json
+test_ocr.json
