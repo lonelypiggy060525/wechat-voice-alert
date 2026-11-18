@@ -1,0 +1,12 @@
+# runtime
+pywin32>=306        # SAPI 语音（win32com）
+winsdk>=1.0.0b10    # Windows 通知中心 / OCR 辅助（notif_watcher）
+pillow>=10          # 窗口截图、托盘图标
+numpy>=1.26         # 音效合成、像素指纹
+pystray>=0.19       # 托盘常驻
+rapidocr_onnxruntime>=1.4   # 离线中文 OCR
+edge-tts>=6.1       # 在线神经语音（断网自动回退 SAPI）
+
+# 仅 dev/ 下的探测脚本需要
+# uiautomation>=2.0
+# comtypes>=1.4

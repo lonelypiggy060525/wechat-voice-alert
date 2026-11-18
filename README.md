@@ -36,6 +36,16 @@
 - 推荐：把微信放在后台、被别的窗口挡住就行，不用理它；
 - 或者勾选界面里的「微信被最小化时自动还原到后台」，程序会把它还原（不抢焦点，并且压到其他窗口下面，不会跳到最前面），代价是微信会时不时自己冒出来。
 
+## 从源码运行
+
+```bat
+uv venv --python 3.11 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+.venv\Scripts\pythonw.exe app.py
+```
+
+需要 ffmpeg 才能用 m4a/flac 这类格式（程序会自动在 PATH / winget 目录里找）。
+
 ## 运行
 
 双击 `启动.vbs`（无控制台窗口）。或：
