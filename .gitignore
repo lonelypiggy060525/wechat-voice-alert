@@ -1,0 +1,18 @@
+# python / venv
+.venv/
+__pycache__/
+*.py[cod]
+
+# runtime artefacts
+cache/
+app_run.log
+shot*.png
+*.png
+
+# personal audio (not part of the project)
+音效/
+*.m4a
+*.mp3
+
+# local config lives in %APPDATA%, never here
+config.local.json
