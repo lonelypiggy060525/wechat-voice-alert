@@ -499,7 +499,7 @@ class ChatListWatcher(threading.Thread):
         Waits until the conversation header actually shows that chat, so we never
         read the previous chat's text by accident."""
         name = row.get("name", "")
-        if user32.GetForegroundWindow() == hwnd:
+        if user32.GetForegroundWindow() == hwnd and is_on_screen(hwnd):
             return ""          # the user is reading WeChat right now - never yank the view
         click_chat_row(hwnd, int(row.get("y", 0)) + 20)
         deadline = time.time() + 3.5

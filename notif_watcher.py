@@ -260,11 +260,24 @@ def wechat_running() -> bool:
         return False
 
 
+def _window_on_screen(hwnd: int) -> bool:
+    """A window parked outside the virtual desktop is not something the user is looking at."""
+    user32 = ctypes.windll.user32
+    rect = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    vx = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+    vy = user32.GetSystemMetrics(77)
+    vw = user32.GetSystemMetrics(78)
+    vh = user32.GetSystemMetrics(79)
+    return not (rect.right <= vx or rect.left >= vx + vw
+                or rect.bottom <= vy or rect.top >= vy + vh)
+
+
 def wechat_focused() -> bool:
-    """True when the WeChat main window is the foreground window."""
+    """True when the WeChat main window is the foreground window **and** actually on screen."""
     try:
         hwnd = ctypes.windll.user32.GetForegroundWindow()
-        if not hwnd:
+        if not hwnd or not _window_on_screen(hwnd):
             return False
         cls = ctypes.create_unicode_buffer(128)
         ctypes.windll.user32.GetClassNameW(hwnd, cls, 128)

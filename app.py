@@ -14,6 +14,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
@@ -179,6 +180,8 @@ class App(tk.Tk):
         self.watcher: wechat_list.ChatListWatcher | None = None
         self.hotkeys = hotkey_mod.HotkeyManager(lambda: self.queue.put(("stop", None)))
         self._announce_token = 0
+        self._announce_q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._announce_worker, name="announcer", daemon=True).start()
         self._save_job = None
         self.tray = None
         self._tray_thread = None
@@ -705,6 +708,11 @@ class App(tk.Tk):
 
     def _stop_speech(self) -> None:
         self._announce_token += 1
+        while True:                       # drop everything still waiting to be spoken
+            try:
+                self._announce_q.get_nowait()
+            except queue.Empty:
+                break
         self.tts.stop()
         self.player.stop()
 
@@ -898,15 +906,7 @@ class App(tk.Tk):
         self._announce(sender, chat, content, msg)
 
     def _announce(self, sender: str, chat: str, content: str, raw: dict | None = None) -> None:
-        self._announce_token += 1
-        token = self._announce_token
-        played = False
-        if self.cfg.sound_enabled:
-            path = sound_player.resolve_sound(self._current_sound_path())
-            if path:
-                played = self.player.play(path, float(self.vol_slider.get()))
-        if not self.tts_enabled_var.get():
-            return
+        """Queue one announcement; the worker plays them strictly one after another."""
         template = self.tpl_var.get() or "{sender}说：{content}"
         try:
             text = template.format(sender=sender, chat=chat, content=content)
@@ -919,18 +919,52 @@ class App(tk.Tk):
         if len(text) > limit:
             text = text[:limit] + "…"
 
-        def speak() -> None:
-            if token != self._announce_token:
-                return
-            self.tts.set_voice(self._current_voice())
-            self.tts.set_rate(int(self.rate_slider.get()))
-            self.tts.set_volume(int(self.tts_vol_slider.get()))
-            self.tts.speak(text)
+        path = ""
+        if self.cfg.sound_enabled:
+            path = sound_player.resolve_sound(self._current_sound_path()) or ""
+        item = {
+            "text": text,
+            "sound": path,
+            "sound_vol": float(self.vol_slider.get()),
+            "tts_on": bool(self.tts_enabled_var.get()),
+            "voice": self._current_voice(),
+            "rate": int(self.rate_slider.get()),
+            "tts_vol": int(self.tts_vol_slider.get()),
+            "token": self._announce_token,
+        }
+        if self._announce_q.qsize() >= 8:      # a burst of spam should not build a backlog
+            return
+        self._announce_q.put(item)
 
-        if played:
-            self.after(300, speak)
-        else:
-            speak()
+    def _announce_worker(self) -> None:
+        while True:
+            item = self._announce_q.get()
+            if item is None:
+                continue
+            if item["token"] != self._announce_token:
+                continue                        # stopped while it was waiting
+            if item["sound"]:
+                try:
+                    self.player.play(item["sound"], item["sound_vol"])
+                    ms = self.player.duration_ms() or 0
+                    time.sleep(max(0.25, min(0.9, ms / 1000.0)))
+                except Exception:
+                    pass
+                if item["token"] != self._announce_token:
+                    continue
+            if not item["tts_on"]:
+                continue
+            try:
+                self.tts.set_voice(item["voice"])
+                self.tts.set_rate(item["rate"])
+                self.tts.set_volume(item["tts_vol"])
+                self.tts.speak(item["text"], replace=False)
+            except Exception:
+                continue
+            # block until this clip has actually finished before starting the next one
+            while self.tts.busy() and item["token"] == self._announce_token:
+                time.sleep(0.1)
+            time.sleep(0.15)
 
     def _simulate(self) -> None:
         self._on_message({"chat": "测试会话", "sender": "李明", "content": "晚上七点老地方见，别迟到了", "texts": []})

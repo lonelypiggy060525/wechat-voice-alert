@@ -98,6 +98,8 @@ class TTSEngine:
         self._ready = threading.Event()
         self._stop_flag = threading.Event()
         self._playing_until = 0.0
+        self._busy = 0
+        self._busy_lock = threading.Lock()
         self._player = SoundPlayer()
         self._thread = threading.Thread(target=self._run, name="tts", daemon=True)
         self._thread.start()
@@ -109,6 +111,8 @@ class TTSEngine:
             return
         if replace:
             self.stop()
+        with self._busy_lock:
+            self._busy += 1
         self._q.put(("say", text))
 
     def stop(self) -> None:
@@ -117,6 +121,13 @@ class TTSEngine:
         self._stop_flag.set()
         self._playing_until = 0.0
         self._q.put(("stop", None))
+
+    def busy(self) -> bool:
+        """True while a clip is queued, being synthesised, or still playing."""
+        with self._busy_lock:
+            if self._busy > 0:
+                return True
+        return self.is_speaking()
 
     def set_voice(self, value: str) -> None:
         self.voice = normalize_voice(value)
@@ -164,7 +175,11 @@ class TTSEngine:
                 try:
                     if cmd == "say":
                         self._stop_flag.clear()
-                        self._say(arg)
+                        try:
+                            self._say(arg)
+                        finally:
+                            with self._busy_lock:
+                                self._busy = max(0, self._busy - 1)
                     elif cmd == "stop":
                         self._stop_flag.set()
                         self._playing_until = 0.0
