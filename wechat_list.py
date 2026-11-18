@@ -342,6 +342,7 @@ class ChatListWatcher(threading.Thread):
         self.stealth = stealth or (lambda: False)
         self.full_read = full_read or (lambda: False)
         self._stealth_applied = False
+        self._fg_was = False
         self._stop = threading.Event()
         self._engine = None
         self._prev: dict[str, tuple] = {}
@@ -399,6 +400,7 @@ class ChatListWatcher(threading.Thread):
                     show_in_background(hwnd)
                     if self.stealth():
                         park_offscreen(hwnd)
+                    self._fg_was = True     # our own restore, not the user asking to see it
                     time.sleep(0.8)
                     continue
                 self._set_status("微信在托盘里/已最小化，勾选「自动还原」才能提醒" if hidden
@@ -406,13 +408,24 @@ class ChatListWatcher(threading.Thread):
                 time.sleep(1.2)
                 continue
 
-            # stealth: park it once after start-up, never fight the user afterwards
+            # stealth: park once at start-up, pull it back when the user asks for it
+            fg = user32.GetForegroundWindow() == hwnd
             if self.stealth():
-                if not self._stealth_applied and is_on_screen(hwnd):
-                    park_offscreen(hwnd)
-                self._stealth_applied = True
+                if not self._stealth_applied:
+                    if not is_on_screen(hwnd):
+                        self._stealth_applied = True      # already parked (e.g. from last run)
+                    else:
+                        park_offscreen(hwnd)
+                        self._stealth_applied = True
+                        # parking is our doing even if WeChat happened to be focused
+                        self._fg_was = fg
+                elif fg and not self._fg_was and not is_on_screen(hwnd):
+                    # taskbar click / alt-tab: the user wants to see it again
+                    bring_on_screen(hwnd)
+                self._fg_was = fg
             else:
                 self._stealth_applied = False
+                self._fg_was = False
             img = capture_window(hwnd)
             if img is None:
                 time.sleep(self.interval)
