@@ -127,22 +127,101 @@ def _same_chat(header: str, name: str) -> bool:
     return head.startswith(target) or target.startswith(head) or target in head
 
 
-def parse_last_bubble(lines: list[dict], width: int) -> str:
+_PLACEHOLDER_LINES = ("长按鼠标语音输入", "按住说话", "发送消息", "输入消息", "按 Enter 发送")
+
+
+def conversation_bottom(img) -> int:
+    """Y of the conversation area's bottom edge (above WeChat's input box).
+
+    The input box is filled with the same colour as the chat background, but its top border is a
+    full-width uniform line a few RGB steps lighter - that row is what we look for. Without this,
+    OCR happily reads the input box placeholder ("长按鼠标语音输入") as the newest message."""
+    a = np.asarray(img.convert("RGB")).astype(np.int16)
+    x0, x1 = CONV_LEFT + 20, img.width - 20
+    band = a[:, x0:x1]
+    sample = band[CONV_TOP:img.height - 40]
+    if sample.size == 0:
+        return img.height - 95
+    colors, counts = np.unique(sample.reshape(-1, 3), axis=0, return_counts=True)
+    bg = colors[counts.argmax()].astype(int)
+    for y in range(img.height // 2, img.height - 10):
+        row = band[y]
+        uniq, cnt = np.unique(row, axis=0, return_counts=True)
+        if cnt.max() / row.shape[0] < 0.8:
+            continue
+        color = uniq[cnt.argmax()].astype(int)
+        if abs(color - bg).sum() >= 12:
+            return max(CONV_TOP + 20, y - 4)
+    return img.height - 95
+
+
+def bubble_bands(img, top: int = CONV_TOP, bottom: int | None = None) -> list[tuple[int, int]]:
+    """Vertical extents of the message bubbles in the conversation pane.
+
+    The bubble background differs from the chat background by a few RGB steps in both themes,
+    so the most common row colour is the chat background and any row with enough other pixels
+    belongs to a bubble. This is what lets a long message keep all of its lines together."""
+    a = np.asarray(img.convert("RGB")).astype(np.int16)
+    bottom = bottom or conversation_bottom(img)
+    band = a[top:bottom, CONV_LEFT + 25:img.width - 25]
+    if band.size == 0:
+        return []
+    flat = band.reshape(-1, 3)
+    colors, counts = np.unique(flat, axis=0, return_counts=True)
+    bg = colors[counts.argmax()]
+    diff = np.abs(band - bg).sum(axis=2) > 18
+    rows = diff.mean(axis=1) > 0.08
+    spans: list[list[int]] = []
+    start = None
+    for i, has in enumerate(rows):
+        if has and start is None:
+            start = i
+        elif not has and start is not None:
+            spans.append([start + top, i - 1 + top])
+            start = None
+    if start is not None:
+        spans.append([start + top, bottom - 1])
+    merged: list[list[int]] = []
+    for span in spans:
+        if merged and span[0] - merged[-1][1] <= 4:
+            merged[-1][1] = span[1]
+        else:
+            merged.append(span)
+    return [(a_, b_) for a_, b_ in merged if b_ - a_ >= 12]
+
+
+def parse_last_bubble(lines: list[dict], width: int,
+                      bands: list[tuple[int, int]] | None = None) -> str:
     """Reassemble the newest incoming bubble from OCR lines of the conversation pane.
     Drops timestamps and my own right-aligned messages."""
     keep = [l for l in lines
-            if l["x"] < width * 0.62 and not is_time_line(l["text"]) and l["text"].strip()]
+            if l["x"] < width * 0.45 and not is_time_line(l["text"]) and l["text"].strip()
+            and l["text"].strip() not in _PLACEHOLDER_LINES]
     if not keep:
         return ""
     keep.sort(key=lambda l: (l["y"], l["x"]))
-    block = [keep[-1]]
+    last = keep[-1]
+
+    # Preferred: everything inside the last bubble's vertical band. OCR splits long lines
+    # into several boxes and paragraph gaps exceed any sane line-gap threshold, so banding
+    # by the bubble background is the only reliable way to keep a long message whole.
+    if bands:
+        band = next(((t, b) for t, b in bands if t - 4 <= last["y"] <= b + 4), None)
+        if band:
+            inside = [l for l in keep if band[0] - 2 <= l["y"] <= band[1] + 2]
+            if inside:
+                text = "".join(l["text"].strip() for l in
+                               sorted(inside, key=lambda l: (l["y"], l["x"])))
+                if text.strip():
+                    return text.strip()
+
+    block = [last]
     for line in reversed(keep[:-1]):
-        if block[0]["y"] - line["y"] <= 24 and abs(line["x"] - keep[-1]["x"]) <= 16:
+        if block[0]["y"] - line["y"] <= 24 and abs(line["x"] - last["x"]) <= 16:
             block.insert(0, line)
         else:
             break
-    text = "".join(l["text"].strip() for l in block)
-    return text.strip()
+    return "".join(l["text"].strip() for l in block).strip()
 
 
 def virtual_bounds() -> tuple[int, int, int, int]:
@@ -511,9 +590,10 @@ class ChatListWatcher(threading.Thread):
             head = self._ocr_header(img)
             if not _same_chat(head, name):
                 continue
+            bottom = conversation_bottom(img)
             lines = ocr_region(self._get_engine(), img,
-                               (CONV_LEFT, CONV_TOP, img.width - 8, img.height - 95))
-            text = parse_last_bubble(lines, img.width)
+                               (CONV_LEFT, CONV_TOP, img.width - 8, bottom))
+            text = parse_last_bubble(lines, img.width, bubble_bands(img, bottom=bottom))
             if text:
                 return text
         return ""
