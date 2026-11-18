@@ -33,6 +33,7 @@ class Config:
     skip_when_wechat_focused: bool = True
     auto_restore_window: bool = True       # keep WeChat un-minimized so the list stays readable
     stealth_mode: bool = False             # park the WeChat window outside the screen
+    full_read: bool = True                 # open long messages to speak the whole text
     # hotkey
     hotkey: str = "ctrl+alt+q"
     # runtime

@@ -71,6 +71,78 @@ def show_in_background(hwnd: int) -> None:
 
 SWP_NOZORDER = 0x0004
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
+CONV_LEFT, CONV_TOP = 312, 55          # conversation pane starts right of the chat list
+
+_TIME_ONLY = re.compile(
+    r"^(?:(?:昨天|今天|前天|星期[一二三四五六日天]|周[一二三四五六日天]|"
+    r"\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}[日号])?\s*\d{1,2}[:：]\d{2}"
+    r"|昨天|今天|前天|星期[一二三四五六日天]|\d{4}年\d{1,2}月\d{1,2}日)$")
+
+
+def is_time_line(text: str) -> bool:
+    return bool(_TIME_ONLY.match(text.strip()))
+
+
+def click_chat_row(hwnd: int, y: int, x: int = 180) -> None:
+    """Select a chat row without moving the mouse or focusing the window."""
+    lp = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+    user32.PostMessageW(hwnd, 0x0201, 0x0001, lp)     # WM_LBUTTONDOWN
+    time.sleep(0.04)
+    user32.PostMessageW(hwnd, 0x0202, 0, lp)          # WM_LBUTTONUP
+
+
+def ocr_region(engine, img, box: tuple[int, int, int, int]) -> list[dict]:
+    """OCR an arbitrary region; coordinates come back in full-image space."""
+    crop = img.crop(box)
+    crop = crop.resize((int(crop.width * 1.5), int(crop.height * 1.5)), Image.LANCZOS)
+    result, _ = engine(np.asarray(crop), use_cls=False)
+    lines = []
+    for item in (result or []):
+        box_pts, text, score = item
+        if score < 0.5:
+            continue
+        xs = [p[0] / 1.5 for p in box_pts]
+        ys = [p[1] / 1.5 for p in box_pts]
+        lines.append({"text": text, "x": int(min(xs)) + box[0], "y": int(min(ys)) + box[1],
+                      "w": int(max(xs) - min(xs))})
+    return lines
+
+
+def _wants_full(content: str, preview_w: int = 0) -> bool:
+    """True when the list preview was trimmed: its rendered width fills the column."""
+    text = (content or "").strip()
+    if not text or text.startswith("["):
+        return False
+    return preview_w >= 150 or len(text) >= 18
+
+
+def _same_chat(header: str, name: str) -> bool:
+    """Compare an OCR'd conversation header with a chat-list name, tolerating OCR noise."""
+    def norm(s: str) -> str:
+        return re.sub(r"[\s\W_]+", "", s or "")
+
+    head, target = norm(header), norm(name)
+    if not head or not target:
+        return False
+    return head.startswith(target) or target.startswith(head) or target in head
+
+
+def parse_last_bubble(lines: list[dict], width: int) -> str:
+    """Reassemble the newest incoming bubble from OCR lines of the conversation pane.
+    Drops timestamps and my own right-aligned messages."""
+    keep = [l for l in lines
+            if l["x"] < width * 0.62 and not is_time_line(l["text"]) and l["text"].strip()]
+    if not keep:
+        return ""
+    keep.sort(key=lambda l: (l["y"], l["x"]))
+    block = [keep[-1]]
+    for line in reversed(keep[:-1]):
+        if block[0]["y"] - line["y"] <= 24 and abs(line["x"] - keep[-1]["x"]) <= 16:
+            block.insert(0, line)
+        else:
+            break
+    text = "".join(l["text"].strip() for l in block)
+    return text.strip()
 
 
 def virtual_bounds() -> tuple[int, int, int, int]:
@@ -230,7 +302,7 @@ def group_rows(lines: list[dict]) -> list[dict]:
             txt = clean_line(ln["text"])
             if not txt:
                 continue
-            parts.append((ln["x"], txt, ln["y"]))
+            parts.append((ln["x"], txt, ln["y"], ln.get("w", 0)))
         if not parts:
             continue
         parts.sort(key=lambda p: (p[2], p[0]))
@@ -247,27 +319,32 @@ def group_rows(lines: list[dict]) -> list[dict]:
         if not _NAME_OK.search(name):
             continue
         preview = ""
-        for x, txt, y in parts[1:]:
+        preview_w = 0
+        for x, txt, y, w in parts[1:]:
             if x < 150:  # right-aligned timestamps live past x=150
                 preview = txt  # keep the bottom-most line: that's the message preview
-        out.append({"y": parts[0][2], "name": name, "preview": preview, "badge": badge})
+                preview_w = w
+        out.append({"y": parts[0][2], "name": name, "preview": preview, "badge": badge,
+                    "preview_w": preview_w})
     return out
 
 
 class ChatListWatcher(threading.Thread):
     def __init__(self, on_message: Callable[[dict], None], on_status: Callable[[str], None],
                  interval: float = 0.8, auto_restore: Callable[[], bool] | None = None,
-                 stealth: Callable[[], bool] | None = None) -> None:
+                 stealth: Callable[[], bool] | None = None,
+                 full_read: Callable[[], bool] | None = None) -> None:
         super().__init__(name="chatlist-watcher", daemon=True)
         self.on_message = on_message
         self.on_status = on_status
         self.interval = interval
         self.auto_restore = auto_restore or (lambda: False)
         self.stealth = stealth or (lambda: False)
+        self.full_read = full_read or (lambda: False)
         self._stealth_applied = False
         self._stop = threading.Event()
         self._engine = None
-        self._prev: dict[str, str] = {}
+        self._prev: dict[str, tuple] = {}
         self._last_sig: int | None = None
         self._last_ocr = 0.0
         self._status = ""
@@ -298,7 +375,8 @@ class ChatListWatcher(threading.Thread):
                 continue
             xs = [p[0] / 1.5 for p in box]
             ys = [p[1] / 1.5 for p in box]
-            lines.append({"text": text, "x": int(min(xs)), "y": int(min(ys)) + 60})
+            lines.append({"text": text, "x": int(min(xs)), "y": int(min(ys)) + 60,
+                          "w": int(max(xs) - min(xs))})
         return lines
 
     def run(self) -> None:
@@ -316,7 +394,8 @@ class ChatListWatcher(threading.Thread):
                 continue
             if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
                 hidden = not user32.IsWindowVisible(hwnd)
-                if self.auto_restore():
+                if self.auto_restore() or self.stealth():
+                    # stealth implies "keep working": bring it back off-screen instead of leaving it dead
                     show_in_background(hwnd)
                     if self.stealth():
                         park_offscreen(hwnd)
@@ -370,6 +449,7 @@ class ChatListWatcher(threading.Thread):
             else:
                 self._set_status(f"运行中 · {len(unread_rows)} 条未读")
 
+            clicked = False
             for row in unread_rows:
                 name, preview, badge = row["name"], row["preview"], row.get("badge")
                 if not name:
@@ -377,14 +457,59 @@ class ChatListWatcher(threading.Thread):
                 old = self._prev.get(name)          # (preview, badge) or None
                 changed = old is None or old[0] != preview or (badge is not None and old[1] != badge)
                 if seeded and changed and (preview or badge):
-                    self.on_message(self._make_message(name, preview))
-                self._prev[name] = (preview, badge)
+                    msg = self._make_message(name, preview)
+                    if self.full_read() and _wants_full(msg["content"], row.get("preview_w", 0)):
+                        full = self._read_full(hwnd, row)
+                        if full:
+                            msg["content"] = full
+                            msg["full"] = True
+                        clicked = True
+                    self.on_message(msg)
+                    self._prev[name] = (preview, badge)
+                    if clicked:
+                        # selecting a chat reorders the list - re-capture before touching rows again
+                        break
+                else:
+                    self._prev[name] = (preview, badge)
             # remember rows that lost their badge, so the next unread is detected again
-            for row in rows:
-                if row["preview"]:
-                    self._prev.setdefault(row["name"], (row["preview"], row.get("badge")))
+            if not clicked:
+                for row in rows:
+                    if row["preview"]:
+                        self._prev.setdefault(row["name"], (row["preview"], row.get("badge")))
+            else:
+                self._last_sig = None
             seeded = True
             time.sleep(self.interval)
+
+    def _read_full(self, hwnd: int, row: dict) -> str:
+        """Open the chat (posted click, no focus change) and OCR the newest bubble.
+        Waits until the conversation header actually shows that chat, so we never
+        read the previous chat's text by accident."""
+        name = row.get("name", "")
+        if user32.GetForegroundWindow() == hwnd:
+            return ""          # the user is reading WeChat right now - never yank the view
+        click_chat_row(hwnd, int(row.get("y", 0)) + 20)
+        deadline = time.time() + 3.5
+        while time.time() < deadline:
+            time.sleep(0.3)
+            img = capture_window(hwnd)
+            if img is None:
+                continue
+            head = self._ocr_header(img)
+            if not _same_chat(head, name):
+                continue
+            lines = ocr_region(self._get_engine(), img,
+                               (CONV_LEFT, CONV_TOP, img.width - 8, img.height - 95))
+            text = parse_last_bubble(lines, img.width)
+            if text:
+                return text
+        return ""
+
+    def _ocr_header(self, img) -> str:
+        crop = img.crop((CONV_LEFT, 42, min(img.width, 780), 88))
+        crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
+        result, _ = self._get_engine()(np.asarray(crop), use_cls=False)
+        return " ".join(text for _box, text, _score in (result or []))
 
     @staticmethod
     def _make_message(name: str, preview: str) -> dict:

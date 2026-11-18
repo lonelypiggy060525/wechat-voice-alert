@@ -477,9 +477,14 @@ class App(tk.Tk):
         self._on_tts_volume_change(self.tts_vol_slider.get())
 
         btns = tk.Frame(card, bg=CARD)
-        btns.pack(fill="x", pady=(14, 0))
-        ttk.Button(btns, text="停止播报", command=self._stop_speech).pack(side="left")
-        tk.Label(btns, text="快捷键也能随时打断", bg=CARD, fg="#9AA1A9",
+        btns.pack(fill="x", pady=(8, 0))
+        self.full_read_var = tk.BooleanVar(value=self.cfg.full_read)
+        self._check(btns, "朗读完整内容（长消息会打开会话去读，代价是该会话变成已读）",
+                    self.full_read_var, self._mark_dirty).pack(anchor="w")
+        btns2 = tk.Frame(card, bg=CARD)
+        btns2.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns2, text="停止播报", command=self._stop_speech).pack(side="left")
+        tk.Label(btns2, text="快捷键也能随时打断", bg=CARD, fg="#9AA1A9",
                  font=FONT_SMALL).pack(side="left", padx=10)
 
     def _build_filter_page(self, page: tk.Frame) -> None:
@@ -821,7 +826,8 @@ class App(tk.Tk):
             lambda s: self.queue.put(("status", s)),
             max(0.6, self.cfg.poll_interval_ms / 1000),
             lambda: self.auto_restore_var.get(),
-            lambda: self.stealth_var.get())
+            lambda: self.stealth_var.get(),
+            lambda: self.full_read_var.get())
         self.watcher.start()
 
     def _pump(self) -> None:
@@ -878,7 +884,7 @@ class App(tk.Tk):
             skip_reason = f"名单「{rule[0]}」设为不提醒" if rule else "名单外默认不提醒"
         rule_note = (f"  [名单:{rule[0]}={'提醒' if rule[1] else '不提醒'}]" if rule
                      else f"  [名单外: {'提醒' if allowed else '不提醒'}]")
-        append_log(f"{chat} | {sender} | {content}"
+        append_log(f"{chat} | {sender} | {content}" + ("  [全文]" if msg.get("full") else "")
                    + (f"  [跳过: {skip_reason}]" if skip_reason else f"  [播报]{rule_note}"))
 
         if self.log_box.size() and str(self.log_box.get(0)).startswith("还没有记录"):
@@ -908,6 +914,8 @@ class App(tk.Tk):
             text = f"{sender}说：{content}"
         text = tts_engine.clean_for_speech(text)
         limit = max(20, self.cfg.max_content_chars)
+        if raw and raw.get("full"):
+            limit = max(limit, 400)
         if len(text) > limit:
             text = text[:limit] + "…"
 
@@ -941,6 +949,7 @@ class App(tk.Tk):
         self.cfg.skip_when_wechat_focused = self.skip_focus_var.get()
         self.cfg.auto_restore_window = self.auto_restore_var.get()
         self.cfg.stealth_mode = self.stealth_var.get()
+        self.cfg.full_read = self.full_read_var.get()
         self.cfg.hotkey = self.hotkey_var.get().strip() or self.cfg.hotkey
 
     def _save(self, silent: bool = False) -> None:
