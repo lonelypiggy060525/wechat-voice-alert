@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import os
 import re
 import threading
 import time
+from ctypes import wintypes
 from typing import Callable, Optional
 
 from winsdk.windows.ui.notifications import NotificationKinds
@@ -195,35 +198,82 @@ class NotificationWatcher(threading.Thread):
             await asyncio.sleep(self.interval)
 
 
-def wechat_running() -> bool:
-    import subprocess
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+TH32CS_SNAPPROCESS = 0x00000002
+WECHAT_EXES = ("weixin.exe", "wechat.exe")
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def _process_names() -> list[tuple[int, str]]:
+    """(pid, exe name) for every process - no subprocess, so no console window flashes."""
+    out: list[tuple[int, str]] = []
+    snap = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap in (0, -1):
+        return out
     try:
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True).stdout.decode("gbk", "replace")
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        if not _kernel32.Process32FirstW(snap, ctypes.byref(entry)):
+            return out
+        while True:
+            out.append((int(entry.th32ProcessID), entry.szExeFile.lower()))
+            if not _kernel32.Process32NextW(snap, ctypes.byref(entry)):
+                break
+    finally:
+        _kernel32.CloseHandle(snap)
+    return out
+
+
+def _pid_image(pid: int) -> str:
+    handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        if _kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value
+    finally:
+        _kernel32.CloseHandle(handle)
+    return ""
+
+
+def wechat_running() -> bool:
+    try:
+        return any(name in WECHAT_EXES for _pid, name in _process_names())
     except Exception:
         return False
-    return "weixin.exe" in out.lower() or "wechat.exe" in out.lower()
 
 
 def wechat_focused() -> bool:
     """True when the WeChat main window is the foreground window."""
-    import ctypes
-    from ctypes import wintypes
-
-    user32 = ctypes.WinDLL("user32")
     try:
-        hwnd = user32.GetForegroundWindow()
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
         if not hwnd:
             return False
         cls = ctypes.create_unicode_buffer(128)
-        user32.GetClassNameW(hwnd, cls, 128)
+        ctypes.windll.user32.GetClassNameW(hwnd, cls, 128)
         if not cls.value.startswith("Qt51514QWindowIcon"):
             return False
         pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        import subprocess
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH", "/FI", f"PID eq {pid.value}"],
-                             capture_output=True).stdout.decode("gbk", "replace")
-        return "weixin.exe" in out.lower() or "wechat.exe" in out.lower()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        image = _pid_image(pid.value).lower()
+        return os.path.basename(image) in WECHAT_EXES
     except Exception:
         return False
 
