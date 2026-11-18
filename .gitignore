@@ -25,3 +25,4 @@ build_onedir/
 *.spec
 ocr_check.json
 test_ocr.json
+RELEASE_NOTES.md
