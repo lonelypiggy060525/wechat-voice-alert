@@ -116,6 +116,35 @@ def _wants_full(content: str, preview_w: int = 0) -> bool:
     return preview_w >= 150 or len(text) >= 18
 
 
+def _badge_value(badge) -> int | None:
+    """Unread counter as an int ('2', '99+'). None when OCR did not read one."""
+    if not badge:
+        return None
+    text = str(badge).strip()
+    if text.endswith("+"):
+        return 99
+    return int(text) if text.isdigit() else None
+
+
+def _is_new_message(old: tuple | None, preview: str, badge) -> bool:
+    """Decide whether a chat row really got a NEW incoming message.
+
+    Borrowed from other WeChat-4.x watchers: only a rise in the unread counter proves an
+    incoming message. Sending a message yourself (from this PC or synced from the phone)
+    changes the preview - and can bump the chat to the top - but never the counter."""
+    if old is None:
+        return False
+    if (preview or "").startswith(("我：", "我:", "你：", "你:")):
+        return False
+    old_preview, old_badge = old
+    new_n, old_n = _badge_value(badge), _badge_value(old_badge)
+    if new_n is not None and old_n is not None:
+        return new_n > old_n
+    if new_n is not None and old_n is None:
+        return True
+    return old_preview != preview        # counters unreadable: fall back to the preview
+
+
 def _same_chat(header: str, name: str) -> bool:
     """Compare an OCR'd conversation header with a chat-list name, tolerating OCR noise."""
     def norm(s: str) -> str:
@@ -547,7 +576,7 @@ class ChatListWatcher(threading.Thread):
                 if not name:
                     continue
                 old = self._prev.get(name)          # (preview, badge) or None
-                changed = old is None or old[0] != preview or (badge is not None and old[1] != badge)
+                changed = _is_new_message(old, preview, badge)
                 if seeded and changed and (preview or badge):
                     msg = self._make_message(name, preview)
                     if self.full_read() and _wants_full(msg["content"], row.get("preview_w", 0)):
